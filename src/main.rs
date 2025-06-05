@@ -1,6 +1,6 @@
 pub mod tracer;
 
-use std::{collections::HashMap, net::IpAddr, sync::{Arc, Mutex}};
+use std::{cell::RefCell, collections::HashMap, net::IpAddr, sync::{Arc, Mutex, RwLock}};
 
 use tracer::{TraceHandler, TraceState};
 use walkers::{lon_lat, sources::OpenStreetMap, HttpTiles, Map, MapMemory, Plugin, Position, extras::{Places}};
@@ -30,7 +30,7 @@ struct GeoTrace {
     use_cache: bool,
     max_hops: usize,
     tracer: TraceHandler,
-    state: Arc<Mutex<TraceState>>
+    state: Arc<RwLock<Option<TraceState>>>
 }
 
 impl GeoTrace {
@@ -40,10 +40,8 @@ impl GeoTrace {
             println!("failed to set zoom level!");
         }
 
-        let state: TraceState = Default::default(); 
-
-        let state_arc = Arc::new(Mutex::new(state));
-        let state_arc_clone = Arc::clone(&state_arc);
+        let state: Option<TraceState> = None; 
+        let state_arc = Arc::new(RwLock::new(state));
         let ctx_clone = cc.egui_ctx.clone();
 
         return Self {
@@ -53,12 +51,8 @@ impl GeoTrace {
             geo_cache: Default::default(),
             use_cache: true,
             max_hops: 30,
-            tracer: TraceHandler::new(move |state| {
-                ctx_clone.request_repaint();
-                let mut lock = state_arc.lock().unwrap();
-                *lock = state;
-            }),
-            state: state_arc_clone,
+            tracer: TraceHandler::new(Arc::clone(&state_arc), move || ctx_clone.request_repaint()),
+            state: state_arc,
             
         }
     }

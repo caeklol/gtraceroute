@@ -1,33 +1,37 @@
-use std::{net::IpAddr, sync::{mpsc::{self, Sender, TryRecvError}, Arc}, thread::{self}, time::Duration};
+use std::{net::IpAddr, sync::{mpsc::{self, Sender, TryRecvError}, Arc, RwLock}, thread::{self}, time::Duration};
 
-#[derive(Clone, Copy, PartialEq)]
-pub struct TraceState {
-    pub counter: u32
+#[derive(Clone, Copy)]
+pub struct Node {
+    ip: IpAddr,
+    latency: Duration,
+    n: usize
 }
 
-impl Default for TraceState {
-    fn default() -> Self {
-        Self { counter: u32::MAX }
-    }
+#[derive(Clone)]
+pub struct TraceState {
+    nodes: Vec<Node>,
+    ttl: u32,
 }
 
 pub struct TraceHandler {
     tracing: bool,
     ip: Option<IpAddr>,
     cancel: Option<Sender<()>>,
-    callback: Arc<dyn Fn(TraceState) + Send + Sync + 'static>
+    callback: Arc<dyn Fn() + Send + Sync + 'static>,
+    state: Arc<RwLock<Option<TraceState>>>
 }
 
 impl TraceHandler {
-    pub fn new<F>(callback: F) -> Self
+    pub fn new<F>(state: Arc<RwLock<Option<TraceState>>>, callback: F) -> Self
     where
-        F: Fn(TraceState) + Send + Sync + 'static,
+        F: Fn() + Send + Sync + 'static,
     {
         Self {
             tracing: false,
             ip: None,
             cancel: None,
-            callback: Arc::new(callback)
+            callback: Arc::new(callback),
+            state
         }
     }
 
@@ -47,14 +51,10 @@ impl TraceHandler {
             let (cancel_tx, cancel_rx) = mpsc::channel();
             self.cancel = Some(cancel_tx);
 
-            let callback_clone = Arc::clone(&self.callback);
+            let callback = Arc::clone(&self.callback);
+            let state = Arc::clone(&self.state);
             thread::spawn(move || {
-                let mut state = TraceState {
-                    counter: 0
-                };
-
                 loop {
-
                     match cancel_rx.try_recv() {
                         Ok(_) | Err(TryRecvError::Disconnected) => {
                             println!("recv cancel");
@@ -63,7 +63,7 @@ impl TraceHandler {
                         Err(TryRecvError::Empty) => {}
                     }
 
-                    (callback_clone)(state);
+                    (callback)();
                 }
             });
         } else {

@@ -6,4 +6,5 @@ edition = "2024"
 [dependencies]
 eframe = "0.31.1"
 egui = "0.31.1"
+hickory-resolver = "0.25.2"
 walkers = "0.38.0"

@@ -1,17 +1,33 @@
+#![feature(ascii_char)]
+#![feature(async_closure)]
 pub mod tracer;
 
-use std::{cell::RefCell, collections::HashMap, net::IpAddr, sync::{Arc, Mutex, RwLock}};
+use std::{cell::RefCell, collections::HashMap, net::IpAddr, sync::{Arc, Mutex, Once, RwLock}, time::Duration};
 
+use tokio::runtime::Runtime;
 use tracer::{TraceHandler, TraceState};
 use walkers::{lon_lat, sources::OpenStreetMap, HttpTiles, Map, MapMemory, Plugin, Position, extras::{Places}};
 use egui::{CollapsingHeader, Context, RichText, SidePanel, Slider};
 use eframe::{App, CreationContext, Frame};
 
 fn main() -> eframe::Result {
+    // https://github.com/parasyte/egui-tokio-example/blob/main/src/main.rs
+    let rt = Runtime::new().expect("Unable to create Runtime");
+    let _enter = rt.enter();
+
+    std::thread::spawn(move || {
+        rt.block_on(async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            }
+        })
+    });
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default(),
         ..Default::default()
     };
+
     eframe::run_native(
         "gtraceroute",
         options,
@@ -81,19 +97,21 @@ impl App for GeoTrace {
                 CollapsingHeader::new("Trace")
                     .default_open(true)
                     .show(ui, |ui| {
-                        egui::Grid::new("traceopts")
-                            .num_columns(2)
-                            .show(ui, |ui| {
-                                let label = ui.label("Host: ");
-                                ui.text_edit_singleline(&mut self.host)
-                                    .labelled_by(label.id);
-                                ui.end_row();
+                        ui.add_enabled_ui(!self.tracer.is_tracing(), |ui| {
+                            egui::Grid::new("traceopts")
+                                .num_columns(2)
+                                .show(ui, |ui| {
+                                        let label = ui.label("Host: ");
+                                        ui.text_edit_singleline(&mut self.host)
+                                            .labelled_by(label.id);
+                                        ui.end_row();
 
-                                let label = ui.label("Max hops: ");
-                                ui.add(Slider::new(&mut self.max_hops, 1..=100))
-                                    .labelled_by(label.id);
-                                ui.end_row();
-                            });
+                                        let label = ui.label("Max hops: ");
+                                        ui.add(Slider::new(&mut self.max_hops, 1..=100))
+                                            .labelled_by(label.id);
+                                        ui.end_row();
+                                });
+                        });
                         
 
                         let button_text = match self.tracer.is_tracing() {
@@ -104,6 +122,7 @@ impl App for GeoTrace {
                         if ui.button(button_text).clicked() {
                             if let Ok(ip) = self.host.parse::<IpAddr>() {
                                 self.tracer.set_ip(ip);
+                                self.tracer.set_max_hops(self.max_hops);
                                 self.toggle_tracer();
                             } else {
                                 println!("invalid ip"); // todo: make errors prettier

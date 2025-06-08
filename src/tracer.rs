@@ -1,9 +1,10 @@
-use std::{any::Any, ascii::Char, mem::MaybeUninit, net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr}, pin::Pin, sync::{atomic::{AtomicBool, Ordering}, mpsc::{self, Sender, TryRecvError}, Arc, RwLock}, time::Duration};
+
+use std::{mem::MaybeUninit, net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6}, sync::{atomic::{AtomicBool, Ordering}, Arc}, time::Duration};
 
 use futures::stream::FuturesUnordered;
-use nex_packet::Packet;
-use socket2::{Domain, Protocol, Socket, Type};
-use tokio::{task::JoinHandle, time::{sleep, Instant}};
+use nex_packet::{icmp::IcmpType, icmpv6::Icmpv6Type, ipv4::Ipv4Packet, ipv6::Ipv6Packet, Packet};
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+use tokio::{sync::{Mutex, RwLock}, task::JoinHandle, time::{sleep, Instant}};
 
 static PAYLOAD: &str = "silly 60 byte ping payload!! i think `ping` generates these?";
 
@@ -13,108 +14,73 @@ pub enum PingMode {
     TCP,
     ICMP
 }
+
+const IPV4_HEADER_LEN: usize = nex_packet::ipv4::MutableIpv4Packet::minimum_packet_size();
+//const IPV6_HEADER_LEN: usize = pnet_packet::ipv6::MutableIpv6Packet::minimum_packet_size();
+const ICMPV4_HEADER_SIZE: usize =
+    nex_packet::icmp::echo_request::MutableEchoRequestPacket::minimum_packet_size();
+const ICMPV6_HEADER_SIZE: usize =
+    nex_packet::icmpv6::echo_request::MutableEchoRequestPacket::minimum_packet_size();
+
+fn build_icmpv4_packet(icmp_packet: &mut nex_packet::icmp::echo_request::MutableEchoRequestPacket, seq: u16) {
+    icmp_packet.set_icmp_type(IcmpType::EchoRequest);
+    icmp_packet.set_sequence_number(seq);
+    icmp_packet.set_identifier(rand::random::<u16>());
+    let icmp_check_sum = nex_packet::util::checksum(&icmp_packet.packet(), 1);
+    icmp_packet.set_checksum(icmp_check_sum);
+}
+
+pub fn build_icmpv6_packet(icmp_packet: &mut nex_packet::icmpv6::echo_request::MutableEchoRequestPacket, seq: u16) {
+    icmp_packet.set_icmpv6_type(Icmpv6Type::EchoRequest);
+    icmp_packet.set_identifier(seq);
+    icmp_packet.set_sequence_number(rand::random::<u16>());
+    let icmp_check_sum = nex_packet::util::checksum(&icmp_packet.packet(), 1);
+    icmp_packet.set_checksum(icmp_check_sum);
+}
+
+pub fn build_icmpv4_echo_packet(seq: u16) -> Vec<u8> {
+    let mut buf = vec![0; ICMPV4_HEADER_SIZE];
+    let mut icmp_packet =
+        nex_packet::icmp::echo_request::MutableEchoRequestPacket::new(&mut buf[..]).unwrap();
+    build_icmpv4_packet(&mut icmp_packet, seq);
+    icmp_packet.packet().to_vec()
+}
+
+pub fn build_icmpv6_echo_packet(seq: u16) -> Vec<u8> {
+    let mut buf = vec![0; ICMPV6_HEADER_SIZE];
+    let mut icmp_packet =
+        nex_packet::icmpv6::echo_request::MutableEchoRequestPacket::new(&mut buf[..]).unwrap();
+    build_icmpv6_packet(&mut icmp_packet, seq);
+    icmp_packet.packet().to_vec()
+}
+
 async fn send_probe(ip: IpAddr, ttl: usize, timeout: Duration, mode: PingMode) {
-    let mut seed: u32 = ttl as u32;
-    seed ^= seed << 13;
-    seed ^= seed >> 17;
-    seed ^= seed << 5; 
-    if seed == 0 {
-        seed = 1;
-    }
+    let seq_number = ttl as u16;
 
-    for _ in 0..5 {
-        seed ^= seed << 13;
-        seed ^= seed >> 17;
-        seed ^= seed << 5; 
-    }
+    match mode {
+        PingMode::ICMP => {
+            let socket = match ip {
+                IpAddr::V4(_) => Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)),
+                IpAddr::V6(_) => Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6)),
+            }.expect("failed to make raw socket!");
 
-    let normalized_rand = seed as f32 / 4294967296.0;
-    //let rand_ms = (normalized_rand * 5000f32) as u64;
-    println!("probe {}, doing work for {}", ttl, rand_ms);
-    tokio::time::sleep(Duration::from_millis(rand_ms)).await;
-    //println!("probe {} done", ttl);
+            let sock_addr: SockAddr = match ip {
+                IpAddr::V4(ip) => SocketAddrV4::new(ip, 0).into(),
+                IpAddr::V6(ip) => SocketAddrV6::new(ip, 0, 0, 0).into(),
+            };
 
-    //let seq_number = ttl as u16;
-
-    //match mode {
-    //    PingMode::ICMP => {
-    //        match ip {
-    //            IpAddr::V4(ip) => {
-    //                let mut socket = IcmpSocket4::new().unwrap();
-    //                socket.set_max_hops(ttl.try_into().unwrap());
-    //                socket
-    //                    .bind("0.0.0.0".parse::<Ipv4Addr>().unwrap())
-    //                    .unwrap();
-
-    //                let payload = PAYLOAD.as_bytes();
-    //                let packet = Icmpv4Packet::with_echo_request(42, seq_number, payload.to_vec()).unwrap();
-
-    //                socket.set_timeout(Some(timeout));
-    //                socket
-    //                    .send_to(ip, packet)
-    //                    .unwrap();
-    //                drop(socket);
-    //            },
-    //            IpAddr::V6(ip) => {
-    //                let mut socket = IcmpSocket6::new().unwrap();
-    //                    socket
-    //                        .bind(ip)
-    //                        .unwrap();
-    //            }
-    //        }
+            socket.set_write_timeout(Some(timeout)).expect("failed to set write timeout!");
+            socket.set_ttl(ttl as u32).expect("failed to set ttl!");
+            socket.send_to(&build_icmpv4_echo_packet(seq_number), &sock_addr).expect("failed to send probe!");
+        }
 
     //    },
     //    PingMode::UDP => {
     //        let identifier_port: u16 = 33433 + ttl as u16;
     //        unimplemented!()
     //    },
-    //    _ => unimplemented!()
-    //}
-}
-
-async fn process_icmp(target: IpAddr, nodes: &mut Vec<Node>, timeout: Duration) {
-    let start = Instant::now();
-    loop {
-        let socket = match target {
-            IpAddr::V4(_) => Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)),
-            IpAddr::V6(_) => Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6))
-        }.expect("failed to create raw socket");
-        socket.set_read_timeout(Some(timeout)).expect("failed to set ipv6 options");
-        let mut buf: Vec<u8> = vec![0; 512];
-        let recv_buf =
-            unsafe { &mut *(buf.as_mut_slice() as *mut [u8] as *mut [MaybeUninit<u8>]) };
-
-        match socket.recv_from(recv_buf) {
-            Ok((bytes_len, addr)) => {
-                let recv_time = Instant::now().duration_since(start);
-                let buf = &buf[0..bytes_len];
-                match target {
-                    IpAddr::V4(target) => {
-                        let recv_ip = addr.as_socket_ipv4();
-                        if let Some(packet) = nex_packet::ipv4::Ipv4Packet::new(buf) {
-                            if let Some(icmp_packet) = nex_packet::icmp::IcmpPacket::new(packet.payload()) {
-                                match icmp_packet.get_icmp_type() {
-                                    nex_packet::icmp::IcmpType::EchoReply => {},
-                                    nex_packet::icmp::IcmpType::TimeExceeded => {},
-                                    _ => {}
-                                };
-                                println!("{:?}", recv_ip);
-                            }
-                        }
-                    },
-                    IpAddr::V6(target) => {
-                    },
-                };
-                
-                
-                break;
-            },
-            Err(_) => {}
-        }
-
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        _ => unimplemented!()
     }
-
 }
 
 #[derive(Clone)]
@@ -125,14 +91,13 @@ pub struct Node {
 
 #[derive(Clone)]
 pub struct TraceState {
-    nodes: Vec<Node>,
-    min_hops: usize // minimum hops to reach destination
+    pub nodes: Vec<Option<Node>>,
+    pub min_hops: usize // minimum hops to reach destination
 }
 
 pub struct TraceHandler {
     callback: Arc<dyn Fn() + Send + Sync + 'static>,
     state: Arc<RwLock<Option<TraceState>>>,
-    cancel: Option<Sender<()>>,
     tracing: Arc<AtomicBool>,
     target: Option<IpAddr>,
     max_hops: usize,
@@ -150,14 +115,13 @@ impl TraceHandler {
         Self {
             tracing: Arc::new(AtomicBool::new(false)),
             target: None,
-            cancel: None,
             callback: Arc::new(callback),
             state,
-            max_hops: 0,
-            rx_timeout: Duration::from_secs(1),
+            max_hops: 30,
+            rx_timeout: Duration::from_secs(3),
             tx_timeout: Duration::from_secs(1),
             handle: None,
-            mode: PingMode::UDP
+            mode: PingMode::ICMP
         }
     }
 
@@ -178,9 +142,21 @@ impl TraceHandler {
         assert!(self.max_hops != 0);
         let future = async move {
             let mut nodes = Vec::new();
-            let min_hops = 6; // traceroute default
+            let mut min_hops = 6; // traceroute default
+            let mut target_hop = 0;
+            
+            
 
             loop {
+                let mut w = state.write().await;
+                *w = Some(TraceState {
+                    nodes: nodes.clone(),
+                    min_hops
+                });
+
+                drop(w);
+
+                (callback)();
                 let mut probes = Vec::new();
 
                 for n in 1..=min_hops {
@@ -189,20 +165,82 @@ impl TraceHandler {
                     }));
                 }
 
-                process_icmp(target, &mut nodes, rx_timeout).await;
+                let start = Instant::now();
+                let socket = match target {
+                    IpAddr::V4(_) => Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)),
+                    IpAddr::V6(_) => Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6))
+                }.expect("failed to create raw socket");
+                socket.set_read_timeout(Some(Duration::from_millis(100))).expect("failed to set ipv6 options");
+                let mut buf: Vec<u8> = vec![0; 512];
+                let recv_buf =
+                    unsafe { &mut *(buf.as_mut_slice() as *mut [u8] as *mut [MaybeUninit<u8>]) };
 
-                if !active.load(Ordering::Relaxed) {
-                    break;
+
+                let mut hops_found = 0;
+                
+                loop {
+                    if !active.load(Ordering::Relaxed) {
+                        break;
+                    }
+
+                    match socket.recv_from(recv_buf) {
+                        Ok((bytes_len, _)) => {
+                            let buf = &buf[0..bytes_len];
+                            if let Some((src, hop, is_target)) = parse_packet(buf, target) {
+                            
+                                hops_found += 1;
+
+                                if nodes.len() < hop {
+                                    nodes.resize(hop, None);
+                                }
+
+                                nodes.insert(hop, Some(Node {
+                                    latency: Instant::now().duration_since(start),
+                                    ip: src
+                                }));
+
+                                if is_target {
+                                    target_hop = hop;
+                                }
+                            }
+
+                        },
+                        Err(_) => {}
+                    }
+
+                    if Instant::now().duration_since(start) > rx_timeout || hops_found == min_hops || hops_found == target_hop {
+                        break;
+                    }
                 }
 
-                let mut w = state.write().unwrap();
+
+
+                if target_hop != 0 {
+                    min_hops = target_hop;
+                } else {
+                    min_hops += 5;
+                    if min_hops > max_hops {
+                        min_hops = max_hops;
+                    }
+                }
+
+                if hops_found == target_hop {
+                    tokio::time::sleep(Duration::from_secs(2)).await;    // avoid spamming target
+                                                                         // after already having
+                                                                         // found the route
+                }
+
+                w = state.write().await;
                 *w = Some(TraceState {
-                    nodes: nodes.to_owned(),
+                    nodes: nodes.clone(),
                     min_hops
                 });
 
+                drop(w);
+
                 (callback)();
             }
+
         };
         self.handle = Some(tokio::spawn(future));
     }
@@ -235,4 +273,71 @@ impl TraceHandler {
     pub fn set_mode(&mut self, mode: PingMode) {
         self.mode = mode;
     }
+}
+
+fn parse_packet(buf: &[u8], target: IpAddr) -> Option<(IpAddr, usize, bool)> {
+    match target {
+        IpAddr::V4(target) => {
+            if let Some(packet) = nex_packet::ipv4::Ipv4Packet::new(buf) {
+                parse_packetv4(packet, target);
+            }
+        },
+        IpAddr::V6(target) => {
+            if let Some(packet) = nex_packet::ipv6::Ipv6Packet::new(buf) {
+                parse_packetv6(packet, target);
+            }
+        },
+    };
+
+    None
+}
+
+fn parse_packetv6(packet: Ipv6Packet, target: Ipv6Addr) -> Option<(Ipv6Addr, usize, bool)> {
+    let src = packet.get_source();
+    if let Some(icmp_packet) = nex_packet::icmp::IcmpPacket::new(packet.payload()) {
+        match icmp_packet.get_icmp_type() {
+            nex_packet::icmp::IcmpType::EchoReply => {
+                let packet = icmp_packet.packet();
+                if src == target {
+                    let seq_number = u16::from_be_bytes([packet[6], packet[7]]);
+                    let hop: usize = seq_number.into();
+                    return Some((src, hop, true));
+                }
+            },
+            nex_packet::icmp::IcmpType::TimeExceeded => {
+                let packet = icmp_packet.packet();
+                let seq_number = u16::from_be_bytes([packet[34], packet[35]]);
+                let hop: usize = seq_number.into();
+                return Some((src, hop, false));
+            },
+            _ => {}
+        };
+    }
+
+    None
+}
+
+fn parse_packetv4(packet: Ipv4Packet, target: Ipv4Addr) -> Option<(Ipv4Addr, usize, bool)> {
+    let src = packet.get_source();
+    if let Some(icmp_packet) = nex_packet::icmp::IcmpPacket::new(packet.payload()) {
+        match icmp_packet.get_icmp_type() {
+            nex_packet::icmp::IcmpType::EchoReply => {
+                let packet = icmp_packet.packet();
+                if src == target {
+                    let seq_number = u16::from_be_bytes([packet[6], packet[7]]);
+                    let hop: usize = seq_number.into();
+                    return Some((src, hop, true));
+                }
+            },
+            nex_packet::icmp::IcmpType::TimeExceeded => {
+                let packet = icmp_packet.packet();
+                let seq_number = u16::from_be_bytes([packet[34], packet[35]]);
+                let hop: usize = seq_number.into();
+                return Some((src, hop, false));
+            },
+            _ => {}
+        };
+    }
+
+    None
 }

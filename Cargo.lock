@@ -1620,6 +1620,7 @@ dependencies = [
  "futures",
  "hickory-resolver",
  "nex-packet",
+ "rand 0.9.1",
  "socket2",
  "tokio",
  "tokio_socket2",

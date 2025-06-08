@@ -2,9 +2,9 @@
 #![feature(async_closure)]
 pub mod tracer;
 
-use std::{cell::RefCell, collections::HashMap, net::IpAddr, sync::{Arc, Mutex, Once, RwLock}, time::Duration};
+use std::{cell::RefCell, collections::HashMap, net::IpAddr, sync::{Arc, Mutex, Once}, time::Duration};
 
-use tokio::runtime::Runtime;
+use tokio::{runtime::Runtime, sync::RwLock};
 use tracer::{TraceHandler, TraceState};
 use walkers::{lon_lat, sources::OpenStreetMap, HttpTiles, Map, MapMemory, Plugin, Position, extras::{Places}};
 use egui::{CollapsingHeader, Context, RichText, SidePanel, Slider};
@@ -121,7 +121,7 @@ impl App for GeoTrace {
 
                         if ui.button(button_text).clicked() {
                             if let Ok(ip) = self.host.parse::<IpAddr>() {
-                                self.tracer.set_ip(ip);
+                                self.tracer.set_target(ip);
                                 self.tracer.set_max_hops(self.max_hops);
                                 self.toggle_tracer();
                             } else {
@@ -145,6 +145,10 @@ impl App for GeoTrace {
                         });
 
                         ui.label(RichText::new(format!("Cache size: {}", &self.geo_cache.len())).monospace());
+                        let state_lock = &self.state.blocking_read();
+                        if let Some(state) = state_lock.as_ref() {
+                            ui.label(RichText::new(format!("Current TTL: {}", state.min_hops)).monospace());
+                        }
 
                         ui.add_space(5.0);
                         ui.label("After tracing, the IPs of each hop are geolocated. To disable caching of these results, use the controls above.");

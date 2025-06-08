@@ -9,6 +9,7 @@ egui = "0.31.1"
 futures = "0.3.31"
 hickory-resolver = "0.25.2"
 nex-packet = "0.19.1"
+rand = "0.9.1"
 socket2 = { version = "0.5.10", features = ["all"] }
 tokio = { version = "1.45", features = ["full"] }
 tokio_socket2 = "0.1.1"

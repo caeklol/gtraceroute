@@ -129,6 +129,19 @@ impl App for GeoTrace {
                             }
                         }
 
+                        let state_lock = &self.state.blocking_read();
+                        if let Some(state) = state_lock.as_ref() {
+                            ui.label(RichText::new(format!("Current TTL: {}", state.min_hops)).monospace());
+                            for (n, node) in state.nodes.iter().enumerate() {
+                                let n = n + 1;
+                                if let Some(node) = node {
+                                    ui.label(RichText::new(format!("node #{}, src_ip: {}", n, node.ip)).monospace());
+                                } else {
+                                    ui.label(RichText::new(format!("node #{}, src_ip: ???.??.???.??", n)).monospace());
+                                }
+                            }
+                        }
+
                         ui.add_space(5.0);
                     });
 
@@ -145,10 +158,6 @@ impl App for GeoTrace {
                         });
 
                         ui.label(RichText::new(format!("Cache size: {}", &self.geo_cache.len())).monospace());
-                        let state_lock = &self.state.blocking_read();
-                        if let Some(state) = state_lock.as_ref() {
-                            ui.label(RichText::new(format!("Current TTL: {}", state.min_hops)).monospace());
-                        }
 
                         ui.add_space(5.0);
                         ui.label("After tracing, the IPs of each hop are geolocated. To disable caching of these results, use the controls above.");

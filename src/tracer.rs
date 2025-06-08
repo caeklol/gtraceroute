@@ -85,8 +85,8 @@ async fn send_probe(ip: IpAddr, ttl: usize, timeout: Duration, mode: PingMode) {
 
 #[derive(Clone)]
 pub struct Node {
-    ip: IpAddr,
-    latency: Duration
+    pub ip: IpAddr,
+    pub latency: Duration
 }
 
 #[derive(Clone)]
@@ -143,7 +143,7 @@ impl TraceHandler {
         let future = async move {
             let mut nodes = Vec::new();
             let mut min_hops = 6; // traceroute default
-            let mut target_hop = 0;
+            let mut target_hop = usize::MAX;
             
             
 
@@ -187,17 +187,20 @@ impl TraceHandler {
                         Ok((bytes_len, _)) => {
                             let buf = &buf[0..bytes_len];
                             if let Some((src, hop, is_target)) = parse_packet(buf, target) {
-                            
                                 hops_found += 1;
+
+                                if hop > target_hop {
+                                    break;
+                                }
 
                                 if nodes.len() < hop {
                                     nodes.resize(hop, None);
                                 }
 
-                                nodes.insert(hop, Some(Node {
+                                nodes[hop-1] = Some(Node {
                                     latency: Instant::now().duration_since(start),
                                     ip: src
-                                }));
+                                });
 
                                 if is_target {
                                     target_hop = hop;
@@ -215,7 +218,7 @@ impl TraceHandler {
 
 
 
-                if target_hop != 0 {
+                if target_hop != usize::MAX {
                     min_hops = target_hop;
                 } else {
                     min_hops += 5;
@@ -279,12 +282,12 @@ fn parse_packet(buf: &[u8], target: IpAddr) -> Option<(IpAddr, usize, bool)> {
     match target {
         IpAddr::V4(target) => {
             if let Some(packet) = nex_packet::ipv4::Ipv4Packet::new(buf) {
-                parse_packetv4(packet, target);
+                return parse_packetv4(packet, target);
             }
         },
         IpAddr::V6(target) => {
             if let Some(packet) = nex_packet::ipv6::Ipv6Packet::new(buf) {
-                parse_packetv6(packet, target);
+                return parse_packetv6(packet, target);
             }
         },
     };
@@ -292,7 +295,7 @@ fn parse_packet(buf: &[u8], target: IpAddr) -> Option<(IpAddr, usize, bool)> {
     None
 }
 
-fn parse_packetv6(packet: Ipv6Packet, target: Ipv6Addr) -> Option<(Ipv6Addr, usize, bool)> {
+fn parse_packetv6(packet: Ipv6Packet, target: Ipv6Addr) -> Option<(IpAddr, usize, bool)> {
     let src = packet.get_source();
     if let Some(icmp_packet) = nex_packet::icmp::IcmpPacket::new(packet.payload()) {
         match icmp_packet.get_icmp_type() {
@@ -301,14 +304,14 @@ fn parse_packetv6(packet: Ipv6Packet, target: Ipv6Addr) -> Option<(Ipv6Addr, usi
                 if src == target {
                     let seq_number = u16::from_be_bytes([packet[6], packet[7]]);
                     let hop: usize = seq_number.into();
-                    return Some((src, hop, true));
+                    return Some((src.into(), hop, true));
                 }
             },
             nex_packet::icmp::IcmpType::TimeExceeded => {
                 let packet = icmp_packet.packet();
                 let seq_number = u16::from_be_bytes([packet[34], packet[35]]);
                 let hop: usize = seq_number.into();
-                return Some((src, hop, false));
+                return Some((src.into(), hop, false));
             },
             _ => {}
         };
@@ -317,25 +320,27 @@ fn parse_packetv6(packet: Ipv6Packet, target: Ipv6Addr) -> Option<(Ipv6Addr, usi
     None
 }
 
-fn parse_packetv4(packet: Ipv4Packet, target: Ipv4Addr) -> Option<(Ipv4Addr, usize, bool)> {
+fn parse_packetv4(packet: Ipv4Packet, target: Ipv4Addr) -> Option<(IpAddr, usize, bool)> {
     let src = packet.get_source();
     if let Some(icmp_packet) = nex_packet::icmp::IcmpPacket::new(packet.payload()) {
-        match icmp_packet.get_icmp_type() {
+        return match icmp_packet.get_icmp_type() {
             nex_packet::icmp::IcmpType::EchoReply => {
                 let packet = icmp_packet.packet();
                 if src == target {
                     let seq_number = u16::from_be_bytes([packet[6], packet[7]]);
                     let hop: usize = seq_number.into();
-                    return Some((src, hop, true));
+                    return Some((src.into(), hop, true));
+                } else {
+                    None
                 }
             },
             nex_packet::icmp::IcmpType::TimeExceeded => {
                 let packet = icmp_packet.packet();
                 let seq_number = u16::from_be_bytes([packet[34], packet[35]]);
                 let hop: usize = seq_number.into();
-                return Some((src, hop, false));
+                return Some((src.into(), hop, false));
             },
-            _ => {}
+            _ => None
         };
     }
 

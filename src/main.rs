@@ -1,6 +1,7 @@
 #![feature(ascii_char)]
 #![feature(async_closure)]
 pub mod tracer;
+pub mod packet;
 
 use std::{cell::RefCell, collections::HashMap, net::IpAddr, sync::{Arc, Mutex, Once}, time::Duration};
 

@@ -1,6 +1,7 @@
 use nex_packet::{icmp::IcmpType, icmpv6::Icmpv6Type, ipv4::Ipv4Packet, ipv6::Ipv6Packet, Packet};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
-use std::{net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6}, time::Duration};
+use tokio::net::UdpSocket;
+use std::{io::Error, net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6}, time::Duration};
 
 use crate::tracer::PingMode;
 
@@ -41,77 +42,80 @@ pub fn build_icmpv6_echo_packet(seq: u16) -> Vec<u8> {
     icmp_packet.packet().to_vec()
 }
 
-type ParseResult = Option<(IpAddr, usize, bool)>
-
-fn parse_icmpv6(packet: Ipv6Packet, target: Ipv6Addr) -> ParseResult {
-    let src = packet.get_source();
-    if let Some(icmp_packet) = nex_packet::icmp::IcmpPacket::new(packet.payload()) {
-        return match icmp_packet.get_icmp_type() {
-            nex_packet::icmp::IcmpType::EchoReply => {
-                let packet = icmp_packet.packet();
-                if src == target {
-                    let seq_number = u16::from_be_bytes([packet[6], packet[7]]);
-                    let hop: usize = seq_number.into();
-                    return Some((src.into(), hop, true));
-                } else {
-                    None
-                }
-            },
-            nex_packet::icmp::IcmpType::TimeExceeded => {
-                let packet = icmp_packet.packet();
-                let seq_number = u16::from_be_bytes([packet[34], packet[35]]);
-                let hop: usize = seq_number.into();
-                return Some((src.into(), hop, false));
-            },
-            _ => None
-        };
-    }
-
-    None
-
-}
-
-fn parse_icmpv4(packet: Ipv4Packet, target: Ipv4Addr) -> ParseResult {
-    let src = packet.get_source();
-    if let Some(icmp_packet) = nex_packet::icmp::IcmpPacket::new(packet.payload()) {
-        return match icmp_packet.get_icmp_type() {
-            nex_packet::icmp::IcmpType::EchoReply => {
-                let packet = icmp_packet.packet();
-                if src == target {
-                    let seq_number = u16::from_be_bytes([packet[6], packet[7]]);
-                    let hop: usize = seq_number.into();
-                    return Some((src.into(), hop, true));
-                } else {
-                    None
-                }
-            },
-            nex_packet::icmp::IcmpType::TimeExceeded => {
-                let packet = icmp_packet.packet();
-                let seq_number = u16::from_be_bytes([packet[34], packet[35]]);
-                let hop: usize = seq_number.into();
-                return Some((src.into(), hop, false));
-            },
-            _ => None
-        };
-    }
-
-    None
-}
+type ParseResult = Option<(IpAddr, usize, bool)>;
 
 pub fn parse_ipv6(packet: Ipv6Packet, target: Ipv6Addr, mode: PingMode) -> ParseResult {
-    match mode {
-        PingMode::UDP => todo!(),
-        PingMode::TCP => todo!(),
-        PingMode::ICMP => parse_icmpv6(packet, target),
+    let src = packet.get_source();
+    if let Some(icmp_packet) = nex_packet::icmp::IcmpPacket::new(packet.payload()) {
+        return match icmp_packet.get_icmp_type() {
+            nex_packet::icmp::IcmpType::EchoReply => {
+                if mode != PingMode::ICMP { 
+                    return None
+                }
+
+                let packet = icmp_packet.packet();
+                if src == target {
+                    let seq_number = u16::from_be_bytes([packet[6], packet[7]]);
+                    let hop: usize = seq_number.into();
+                    return Some((src.into(), hop, true));
+                } else {
+                    None
+                }
+            },
+            nex_packet::icmp::IcmpType::TimeExceeded => {
+                let packet = icmp_packet.packet();
+                let identifier: usize = match mode {
+                    PingMode::UDP => u16::from_be_bytes([packet[54], packet[55]]).into(),
+                    PingMode::TCP => todo!(),
+                    PingMode::ICMP => u16::from_be_bytes([packet[54], packet[55]]).into(),
+                };
+
+                return Some((src.into(), identifier, false));
+            },
+            _ => None
+        };
     }
+
+    None
 }
 
 pub fn parse_ipv4(packet: Ipv4Packet, target: Ipv4Addr, mode: PingMode) -> ParseResult {
-    match mode {
-        PingMode::UDP => todo!(),
-        PingMode::TCP => todo!(),
-        PingMode::ICMP => parse_icmpv4(packet, target),
+    let src = packet.get_source();
+    if let Some(icmp_packet) = nex_packet::icmp::IcmpPacket::new(packet.payload()) {
+        return match icmp_packet.get_icmp_type() {
+            nex_packet::icmp::IcmpType::EchoReply => {
+                if mode != PingMode::ICMP { 
+                    return None
+                }
+
+                let packet = icmp_packet.packet();
+                if src == target {
+                    let seq_number = u16::from_be_bytes([packet[6], packet[7]]);
+                    let hop: usize = seq_number.into();
+                    return Some((src.into(), hop, true));
+                } else {
+                    None
+                }
+            },
+            nex_packet::icmp::IcmpType::TimeExceeded => {
+                let packet = icmp_packet.packet();
+                let identifier: usize = match mode {
+                    PingMode::UDP => (u16::from_be_bytes([packet[30], packet[31]]) - 33433).into(),
+                    PingMode::TCP => todo!(),
+                    PingMode::ICMP => u16::from_be_bytes([packet[34], packet[35]]).into(),
+                };
+
+                if mode == PingMode::UDP {
+                    return None
+                }
+
+                return Some((src.into(), identifier, false));
+            },
+            _ => None
+        };
     }
+
+    None
 }
 
 pub fn parse_packet(buf: &[u8], target: IpAddr, mode: PingMode) -> ParseResult {
@@ -131,36 +135,44 @@ pub fn parse_packet(buf: &[u8], target: IpAddr, mode: PingMode) -> ParseResult {
     None
 }
 
-pub async fn send_probe(ip: IpAddr, ttl: usize, timeout: Duration, mode: PingMode) {
+pub async fn send_probe(ip: IpAddr, ttl: usize, timeout: Duration, mode: PingMode) -> Result<(), Error> {
     let seq_number = ttl as u16;
-
+    
     match mode {
         PingMode::ICMP => {
             let socket = match ip {
                 IpAddr::V4(_) => Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4)),
                 IpAddr::V6(_) => Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6)),
-            }.expect("failed to make raw socket!");
+            }?;
 
-            let sock_addr: SockAddr = match ip {
-                IpAddr::V4(ip) => SocketAddrV4::new(ip, 0).into(),
-                IpAddr::V6(ip) => SocketAddrV6::new(ip, 0, 0, 0).into(),
-            };
-
-            socket.set_write_timeout(Some(timeout)).expect("failed to set write timeout!");
-            socket.set_ttl(ttl as u32).expect("failed to set ttl!");
+            socket.set_write_timeout(Some(timeout))?;
+            socket.set_ttl(ttl as u32)?;
 
             let packet = match ip {
                 IpAddr::V4(_) => build_icmpv4_echo_packet(seq_number),
                 IpAddr::V6(_) => build_icmpv6_echo_packet(seq_number),
             };
 
-            socket.send_to(&packet, &sock_addr).expect("failed to send probe!");
+            let sock_addr: SockAddr = match ip {
+                IpAddr::V4(ip) => SocketAddrV4::new(ip, 0).into(),
+                IpAddr::V6(ip) => SocketAddrV6::new(ip, 0, 0, 0).into(),
+            };
+
+            socket.send_to(&packet, &sock_addr)?;
+            return Ok(());
         }
 
-        //PingMode::UDP => {
-        //    let identifier_port: u16 = 33433 + ttl as u16;
-        //    unimplemented!()
-        //},
+        PingMode::UDP => {
+            let port = 33433 + seq_number;
+            
+            let socket = UdpSocket::bind("0.0.0.0:0").await?;
+
+            println!(":3");
+            socket.set_ttl(ttl as u32)?;
+            socket.send_to(&[0; 10], (ip, port)).await?;
+
+            return Ok(());
+        },
         _ => unimplemented!()
     }
 }

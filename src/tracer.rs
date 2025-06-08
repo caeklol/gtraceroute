@@ -55,7 +55,7 @@ impl TraceHandler {
             rx_timeout: Duration::from_secs(3),
             tx_timeout: Duration::from_secs(1),
             handle: None,
-            mode: PingMode::ICMP
+            mode: PingMode::UDP
         }
     }
 
@@ -91,12 +91,12 @@ impl TraceHandler {
                 drop(w);
 
                 (callback)();
-                let mut probes = Vec::new();
+                //let mut probes = Vec::new();
 
                 for n in 1..=min_hops {
-                    probes.push(tokio::task::spawn(async move {
-                        packet::send_probe(target, n, tx_timeout, mode).await
-                    }));
+                    //probes.push(tokio::task::spawn(async move {
+                        packet::send_probe(target, n, tx_timeout, mode).await.expect("ughh");
+                    //}));
                 }
 
                 let start = Instant::now();

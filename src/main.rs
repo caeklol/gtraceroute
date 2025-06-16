@@ -1,12 +1,10 @@
-#![feature(ascii_char)]
-#![feature(async_closure)]
 pub mod tracer;
 pub mod packet;
 
-use std::{cell::RefCell, collections::HashMap, net::IpAddr, sync::{Arc, Mutex, Once}, time::Duration};
+use std::{collections::HashMap, net::IpAddr, sync::Arc, time::Duration};
 
 use tokio::{runtime::Runtime, sync::RwLock};
-use tracer::{TraceHandler, TraceState};
+use tracer::{TraceHandler, TraceOpts, TraceState};
 use walkers::{lon_lat, sources::OpenStreetMap, HttpTiles, Map, MapMemory, Plugin, Position, extras::{Places}};
 use egui::{CollapsingHeader, Context, RichText, SidePanel, Slider};
 use eframe::{App, CreationContext, Frame};
@@ -47,7 +45,8 @@ struct GeoTrace {
     use_cache: bool,
     max_hops: usize,
     tracer: TraceHandler,
-    state: Arc<RwLock<Option<TraceState>>>
+    state: Arc<RwLock<Option<TraceState>>>,
+    opts: TraceOpts
 }
 
 impl GeoTrace {
@@ -70,7 +69,7 @@ impl GeoTrace {
             max_hops: 30,
             tracer: TraceHandler::new(Arc::clone(&state_arc), move || ctx_clone.request_repaint()),
             state: state_arc,
-            
+            opts: Default::default()
         }
     }
 
@@ -82,7 +81,7 @@ impl GeoTrace {
         if self.tracer.is_tracing() {
             self.tracer.stop_trace();
         } else {
-            self.tracer.begin_trace();
+            self.tracer.begin_trace(self.opts);
         }
     }
 }
@@ -122,8 +121,8 @@ impl App for GeoTrace {
 
                         if ui.button(button_text).clicked() {
                             if let Ok(ip) = self.host.parse::<IpAddr>() {
-                                self.tracer.set_target(ip);
-                                self.tracer.set_max_hops(self.max_hops);
+                                self.opts.target = ip;
+                                self.opts.max_hops = self.max_hops;
                                 self.toggle_tracer();
                             } else {
                                 println!("invalid ip"); // todo: make errors prettier
@@ -132,14 +131,7 @@ impl App for GeoTrace {
 
                         let state_lock = &self.state.blocking_read();
                         if let Some(state) = state_lock.as_ref() {
-                            ui.label(RichText::new(format!("Current TTL: {}", state.min_hops)).monospace());
-                            for (n, node) in state.nodes.iter().enumerate() {
-                                let n = n + 1;
-                                if let Some(node) = node {
-                                    ui.label(RichText::new(format!("node #{}, src_ip: {}", n, node.ip)).monospace());
-                                } else {
-                                    ui.label(RichText::new(format!("node #{}, src_ip: ???.??.???.??", n)).monospace());
-                                }
+                            for (n, iter) in state.iterations.iter().enumerate() {
                             }
                         }
 
@@ -171,18 +163,17 @@ impl App for GeoTrace {
 
         SidePanel::right("map")
             .resizable(false)
-            .show_separator_line(false) // i dont know if this is redundant and im too lazy to
-                                        // check if it is :)
+            .show_separator_line(false)
             .exact_width(ctx.available_rect().x_range().max)
             .show(ctx, |ui| {
-                let plugin = self.places();
-                let map = Map::new(
-                    Some(&mut self.tiles),
-                    &mut self.map_memory,
-                    lon_lat(0.0, 0.0),
-                ).with_plugin(plugin);
+                //let plugin = self.places();
+                //let map = Map::new(
+                //    Some(&mut self.tiles),
+                //    &mut self.map_memory,
+                //    lon_lat(0.0, 0.0),
+                //).with_plugin(plugin);
 
-                ui.add(map);
+                //ui.add(map);
             });
 
     }
